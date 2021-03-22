@@ -1,0 +1,391 @@
+---
+title: "Geographic Disparities in Health Care Services by Race, Socioeconomic Status, and Rurality"
+author: "Henry Weng"
+date: "December 20th, 2020"
+header-includes:
+    - \usepackage{setspace}\doublespacing
+output:
+  pdf_document: default
+  html_document: default
+bibliography: qrmbib.json
+fontsize: 12pt
+---
+
+<style type="text/css">
+
+h1.title {
+  font-size: 26px;
+  color: Black;
+  text-align: center;
+}
+h4.author { 
+  font-size: 18px;
+  color: Black;
+  text-align: center;
+}
+h4.date {
+  font-size: 12px;
+  color: Black;
+  text-align: center;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = TRUE,
+	warning = TRUE
+)
+#install.packages(stargazer)
+#install.packages(plm)
+require(data.table)
+require(knitr)
+require(tidyverse)
+setwd("~/R/Final_Paper")
+
+#-----------------------
+# Links to datasets:
+# https://www.openicpsr.org/openicpsr/project/111107/version/V1/view
+# https://www.openicpsr.org/openicpsr/project/119451/version/V2/view
+# https://www.openicpsr.org/openicpsr/project/120907/version/V2/view
+# https://www.ers.usda.gov/data-products/rural-urban-commuting-area-codes/
+
+
+hcdata <- fread("nanda_healthcare_tract_2003-2017_02P.csv", 
+              stringsAsFactors = F,
+              data.table = F)
+
+hcdata <- hcdata[, c('tract_fips10', 'year','population', 'count_sales_621')]
+# 1036462 observations <- 74033 tracts * 14 years
+
+# Look at quantiles for outliers.
+quantile(hcdata$population, c(.01,.02,.03,.10, .90, .995), na.rm = TRUE) 
+quantile(hcdata$count_sales_621, c(.005, .01, .10, .90, .99, .995), na.rm = TRUE)
+
+# A separate analysis of population for rural counties
+# quantile(a$population, c(.02,.03,.04,.05,.10, .90, .995), na.rm = TRUE)
+
+# Removing population < 1000 accounts for <2% of Census tracts and <4% of rural tracts
+hcdata <- hcdata %>% filter(population > 1000)
+
+ses00_10 <- fread("nanda_ses_tract_2000-2010_03P.csv",
+                  stringsAsFactors = F,
+                  data.table = F)
+
+ses00_10 <- ses00_10[, c('tract_fips10','pnhwhite03','pnhwhite04','pnhwhite05','pnhwhite06','pnhwhite07','pnhwhite08','pnhwhite09','pnhwhite10', 'punemp03','punemp04','punemp05','punemp06','punemp07','punemp08','punemp09','punemp10', 'ppov03','ppov04','ppov05','ppov06','ppov07','ppov08','ppov09','ppov10')]
+
+# 583128 observations = 72891 tracts * 8 years 
+
+ses08_17 <- fread("nanda_ses_tract_2008-2017_04P.csv",
+                  stringsAsFactors = F,
+                  data.table = F)
+
+ses08_17 <- ses08_17[, c('tract_fips10',
+                         'pnhwhite13_17',
+                         'punemp13_17',
+                         'ppov13_17'
+                         )]
+
+# 73081 observations = 73081 tracts * 1 year
+
+sesdata <- merge(ses00_10, ses08_17, by = "tract_fips10")
+# drops (73081 - 72891) = 190 tracts
+
+sesdata <- sesdata %>% rename(pnhwhite13 = pnhwhite13_17,
+                         punemp13 = punemp13_17,
+                         ppov13 = ppov13_17)
+
+sesdata_long <- reshape(sesdata, 
+                        varying =  c('pnhwhite03','pnhwhite04','pnhwhite05','pnhwhite06','pnhwhite07','pnhwhite08','pnhwhite09','pnhwhite10','pnhwhite13','punemp03','punemp04','punemp05','punemp06','punemp07','punemp08','punemp09','punemp10','punemp13','ppov03','ppov04','ppov05','ppov06','ppov07','ppov08','ppov09','ppov10','ppov13'), 
+                        timevar = "year", idvar = "id", direction = "long", sep = "")
+# 656019 observations = 72891 tracts * 9 years
+# Convert year column
+yv = c(3,4,5,6,7,8,9,10,13)
+
+for(i in yv) {
+  sesdata_long[(sesdata_long$year) == i, "year"] <- 2000 + i
+}
+
+# Rural-urban continuum area codes
+ruca00 <- fread("ruca00.csv",
+              stringsAsFactors = F,
+              data.table = F)
+
+ruca10 <- fread("ruca2010revised.csv",
+                stringsAsFactors = F,
+                data.table = F)
+
+ruca00 <- ruca00[,c("State County Tract Code", "RUCA Primary Code 2000")]
+
+ruca10 <- ruca10[,c("State-County-Tract FIPS Code (lookup by address at http://www.ffiec.gov/Geocode/)", "Primary RUCA Code 2010")]
+
+ruca10 <- ruca10 %>% rename("State County Tract Code" = "State-County-Tract FIPS Code (lookup by address at http://www.ffiec.gov/Geocode/)")
+
+rucadata <- merge(ruca00, ruca10, by = "State County Tract Code", all.y = TRUE)
+
+# Check for RUCA changes from (10-7) to (1-6) between 2000 and 2010.
+rucadata %>% filter('RUCA Primary Code 2000' < 7 & 'Primary RUCA Code 2010' >= 7) # 0 rows
+rucadata %>% filter('RUCA Primary Code 2000' >= 7 & 'Primary RUCA Code 2010' < 7) # 0 rows
+
+# So we can treat the 2010 RUCA code as a constant. Let's just use ruca10 to create our rural variable.
+ruca10$rural <- ifelse(ruca10$`Primary RUCA Code 2010`< 7, 0, 1)
+ruca <- ruca10[,c("State County Tract Code", "rural")]
+
+# DV is heavily right-skewed.
+quantile(hcdata$count_sales_621, c(.01,.10, .90, .99), na.rm = TRUE) 
+
+# A log transformation will be applied to DV; thus the minimum has to equal 1 for log(1) = 0.
+hcdata[hcdata$count_sales_621 < 1, ] # 72113/1003830 rows to be dropped, or ~7.2% of the data
+hcdata <- hcdata %>% 
+  filter(count_sales_621 > 0) 
+
+# Calculate 2013-2017 averages
+means1317 <- hcdata %>%
+  filter(year > 2012) %>%
+  group_by(tract_fips10) %>%
+  summarize(year = 2013,
+            population = mean(population, na.rm = TRUE),
+            count_sales_621 = mean(count_sales_621, na.rm = TRUE))
+
+# Drop years > 2010; rbind 2013-2017 averages 
+hcdata <- hcdata %>% filter(year < 2011)
+hcdata <- rbind(hcdata, means1317)
+```
+
+<br>
+
+<br>
+
+### Introduction 
+The distribution of and access to health care services are largely determined by socioeconomic and demographic factors that affect both providers and consumers. The goal of this study is to explore the geographic variation in the number of health care providers across a national sample of census tracts in the United States, and understand the influence of race, socioeconomic status, and rurality. We used pooled OLS and one-way fixed-effects models to predict provider count for a census tract from its poverty rate, percent unemployed, percent minority, and rurality measurers. Our data consist of observations between 2003 and 2017. We found that each predictor variable was associated with a decrease in provider count, and that rurality has an adverse effect independent of socioeconomic and racial factors. This insight contributes to our understanding of the rural-urban divide in geographic access to health care.
+
+<br>
+
+### Background
+The inequitable geographic distribution of health care services contributes to disparities in health care utilization (Cook et al. 2013) and outcomes (Daly, Mellor, and Millones 2018) by limiting the availability and access to care in certain areas. Prior research has shown that a provider shortage in a geographic area is associated with worse general health status (Liu, 2007). The rural-urban divide in access to care the United States is a useful conceptual framework for analyzing the impact of race, socioeconomic status, and rurality on this distribution. We will establish the statistical and research evidence for the existence of such a divide, explore the underlying social mechanisms, and discuss its interaction with racial and socioeconomic disparities in care.
+
+Approximately 14 percent of the U.S. population lives in rural areas, which amounts to more than 46.2 million people by July 2015 (Kusmin 2017). That these people have worse access to health care compared to their urban counterparts (Cao et al. 2017; Laditka, Laditka, and Probst 2009) and the nation overall (Rosenblatt 2004) is well documented. One study conducted in 1998 revealed a 75% shortage of physicians in rural areas (Glasser et al. 2010), and Carr et al. (2017) found that rurality was associated with significantly lower access to trauma care across the entire U.S. population in 2010. However, note that the magnitude of rural-urban disparity depends on the types of access or care metrics (Kirby and Yabroff 2020) and control variables (Loftus et al. 2018) being used. This is a matter of good study design in one sense and of distinguishing the effect of rurality net of socioeconomic and demographic disparities in another.
+
+The dynamics of the rural-urban divide in access to care can be clustered under geographic obstacles, area-specific socioeconomic factors related to provider retention and recruitment, socioeconomic differences in consumer health and care-seeking behavior, and the interaction of rurality with racial disparities.
+
+The most prominent geographic obstacle is longer travel distances to providers for rural populations compared to urban ones (Chan, Hart, and Goodman 2006). This has an adverse impact on health outcomes such as early detection of diseases (Huang et al. 2009). Socioeconomic status has been shown to be negatively associated with travel distance, e.g. for preventive child dental care in Georgia (Cao et al. 2017), and moderates its effect on care access and utilization (Wang and Luo 2005). The effect of distance on perceived access also depends on the type of care that is being sought; it factors into accessibility to general practitioners but not hospitals (Comber, Brunsdon, and Radburn 2011). Spatial factors are also involved in provider recruitment and satisfaction. The proximity of certain rural areas to metropolitan areas may contribute to higher rates of departure from rural practice (McGrail et al. 2017a), whereas long distance from urban food and clothing centers is seen as a negative aspect of rural work by some physicians (Glasser et al. 2010). 
+
+More prominent are socioeconomic factors in the lower retention and recruitment of providers in rural areas. The foremost factor is provider income (Grobler, Marais, and Mabunda 2015) and the potential to earn a higher income over time (Daniels et al. 2007); being tied to local purchasing power and the state of the local economy, salaries are lower overall in rural areas because they are poorer overall than urban ones, as demonstrated in Figure 1. This acts as a disincentive to practice in rural areas. McGrail et al. (2017a) found that the overall workforce supply of physicians in the U.S. was maldistributed against locating in smaller (population-wise) and poorer rural areas. The lower socioeconomic status of rural areas may negatively affect the evaluation of local providers by pay-for-performance programs and thus reduce their level of compensation (Chien et al. 2012). It may also increase the likelihood that financially distressed rural hospitals close. Thomas et al. (2016) found that areas of closed rural hospitals had a higher rate of unemployment than those of similar hospitals that remained open. Nationwide, 162 rural hospitals have closed since 2005 (Diaz and Pawlik 2020).
+
+<h2>**Figure 1. Poverty Rates of Rural and Urban Areas**</h2>
+```{r out.width = '70%', fig.align = 'center'}
+include_graphics('povertyrural.png')
+```
+
+Meanwhile, socioeconomic differences in individual health and care-seeking behaviors among consumers also contribute to the rural-urban divide. Rural residents are more likely to report financial obstacles to obtaining care compared to urban residents (Doescher et al. 2009). They also tend to have poorer health overall (Douthit et al. 2015) and different health-seeking behaviors that exacerbate disparities in care (Brems et al. 2006). There are also differences in the kind of health care services utilized in high SES compared to low SES neighborhoods (Hussein et al. 2016). Finally, the effect of socioeconomic status and individual health on access perceptions was shown to vary spatially, suggesting other local factors are also at play (Comber et al. 2011). 
+
+The rural-urban divide interacts with existing racial disparity in access to health care in complex ways, producing intersectional effects on the geographic distribution of care services. Prior research has shown a significant relationship between race alone and geography in care access e.g. via geographic barriers to care access for Hispanic communities in Louisville, (Edward and Biddle 2017), and fewer provider offices and facilities in minority primary care service areas compared to white PCSAs (Chan et al. 2019). Minorities may be doubly disadvantaged in rural areas, which have higher poverty rates and longer travel distances, compared to their urban counterparts or rural non-Hispanic whites (Heflinger and Christens 2006; Probst et al. 2004). Distinguishing the effect of rurality and race on geographic disparity in health care services – and vice versa – then becomes an important task. One study found that rural-urban differences in reported care became statistically insignificant after controlling for demographic and socioeconomic factors (Loftus et al. 2018). However, another found that rural status conferred additional disadvantage on health care use for all racial and ethnic groups, independent of poverty (Caldwell et al. 2016). 
+
+One additional factor to the rural-urban divide in access to health care that is becoming increasingly important in the 21st century is the regional availability of the Internet (Douthit et al. 2015). Specialists expressed reluctance to work in rural or underdeveloped areas that had meager technological facilities (Rosenblatt 2004). Much of the health care benefits of information technology thus far has been concentrated in urban areas.
+
+The literature calls for a greater understanding of how rurality, socioeconomic status, and race relate to the geographic distribution of health services. Much of the prior research is limited to a certain region of the United States, by a relatively small sample size, and/or to cross-sectional data on providers or consumers at a specific time. Hence, we aim to explore variation in the number of providers within a Census tract across all tracts in the United States between 2000 and 2017 and its relationship to tract-level socioeconomic status, racial composition, and rurality. 
+
+<br>
+
+### Research Question
+Are socioeconomic status, percent minority, and rurality negatively associated with the number of providers in a given census tract? 
+
+### Methods 
+
+#### Data Source
+
+We combined three datasets on socioeconomic status, demographic characteristics, and health care services by census tract compiled by the National Neighborhood Data Archive (NaNDA) with 2010 rural-urban commuting area (RUCA) codes. The NaNDA datasets were retrieved from the online Interuniversity Consortium for Political and Social Research, and the RUCA codes were retrieved from the U.S. Department of Agriculture website. 
+
+The first NaNDA dataset contains socioeconomic and demographic data on each census tract in the United States and Puerto Rico for the years 2000-2010. Data are drawn from the U.S. Census in 2000 (Summary File 3) and the American Community Survey (ACS) for 2008-2012 (5-year estimates). Annual measures for the intervening years (2001-2009) are interpolated using a linear interpolation between the 2000 census and the midpoint of the ACS 5-year estimate (2010). Census tract boundaries were normalized to the 2010 tract boundaries.
+
+The second NaNDA dataset contains socioeconomic and demographic data on each census tract in the United States and Puerto Rico for the years 2008-2017. Data are drawn from the ACS 5-year estimates for 2008-2012 and for 2013-2017. Only the latter estimates are used in this study. Both are based on 2010 census tract boundaries.
+
+The third NaNDA dataset contains the number and density of health care services in each Census tract in the United States and Puerto Rico for the years 2003-2017, minus 2016. Establishment data was taken from the National Establishment Time Series (NETS) database, with health care services identified using the North American Industry Classification System (NAICS) codes. Census tract population figures were taken from the first dataset for years 2000-2010 and the second dataset for years 2011-2017.
+
+The 2010 RUCA codes classify census tracts using measures of population density, urbanization, and daily commuting, and are based on data from the 2010 decennial census and the 2006-2010 ACS. The 2000 RUCA codes were deemed extraneous after we observed no significant changes to each tract as defined by our rurality variable. 
+
+<br>
+
+```{r}
+hcdata$log_ahcs <- log(hcdata$count_sales_621)
+  
+# Since hcdata has the most counties, let's use this as the base table and merge sesdata and rucadata with left_join.
+hcsesdata <- left_join(hcdata, sesdata_long, by = c("tract_fips10","year")) 
+
+# a <- hcdata %>% filter(tract_fips10 == 1047956600 & year > 2012)
+# b <- means1317 %>% filter(tract_fips10 == 1047956600)
+# hcsesdata %>% filter(tract_fips10 == 1047956600)
+HCServices <- left_join(hcsesdata, ruca, 
+                        by = c("tract_fips10"="State County Tract Code"))
+
+# HCServices[!complete.cases(HCServices),]
+# colSums(is.na(HCServices))
+
+# Listwise deletion of missing values, 170 rows
+HCServices <- na.omit(HCServices)
+
+# Create % non-white variable 
+HCServices$nonwhite <- 1 - HCServices$pnhwhite
+
+# 70,505 Census tracts * 9 years; staging for PLM 
+HCServices <- HCServices %>% 
+  rename(ctract = tract_fips10,
+         num_ahcs = count_sales_621,
+         povt = ppov,
+         unemp = punemp) %>% 
+  select(ctract, year, num_ahcs, povt, unemp, rural, nonwhite, population, log_ahcs)
+
+HCServices$year <- factor(HCServices$year)
+HCServices$ctract <- factor(HCServices$ctract)
+```
+
+#### Measures
+
+Our first predictor variable is poverty rate, calculated as the proportion of people in a census tract with an income in the past 12 months below the federal poverty level. Our second predictor variable is percent unemployed, calculated as the proportion of people in a census tract aged 16+ and in the labor force that are unemployed. These two variables are our operational definition for socioeconomic status.
+
+Our third predictor variable is rurality, which is assigned to 0 for census tracts with a RUCA code between 1 and 6, and to 1 for census tracts with a RUCA code greater than 6. 
+
+Our fourth predictor variable is percent minority, calculated as 1 minus the proportion of people in a census tract that are non-Hispanic white i.e. the proportion of people that are not non-Hispanic white. 
+
+Our dependent variable is logged provider count, calculated as the logarithm of the count of all ambulatory health services (which includes physicians, mental health counselors, and dentists), whether provided independently or within a clinic or medical center, in a census tract as identified by the NAICS code 621. We opted to use the raw count rather than population or area density measures because the latter had several outliers due to outliers in population count e.g. some census tracts have a population of 1. The logarithm was taken so the variable is more normally distributed, however as a result all observations with count 0 were dropped. The dropped data accounted for less than 7.2% of the dataset.
+
+See Tables 1 and 2 for descriptive statistics of our measures. See Figure 2 for a year-by-year change in mean provider count for rural and urban census tracts.
+
+<br>
+```{r, message = FALSE, results='asis'}
+require(stargazer)
+
+# Continuous data
+stargazer(HCServices[c(4:5,7,9)], header=FALSE, style = "asr",
+          title = "Descriptive Statistics",
+          nobs = FALSE)
+
+# Categorical data
+cat_data <- as.data.frame(rbind(prop.table(table(HCServices$rural))[2] * 100, 
+                                length(unique(HCServices$ctract)),
+                                length(unique(HCServices$year))))
+
+colnames(cat_data) <- c("N/%")
+rownames(cat_data) <- c("Percent Rural", "Census Tract", "Year")
+
+stargazer(cat_data, header=FALSE, style = "asr",
+          title = "Descriptive Statistics",
+          summary = FALSE)
+```
+
+<br>
+
+<h3> **Figure 2: Mean AHCS Count by Year for Rural and Urban Census Tracts** </h3>
+
+```{r }
+# Graphs
+mean_rural <- HCServices %>%
+  group_by(year, rural) %>%
+  summarise(mean_ahcs = mean(num_ahcs))
+mean_rural[, "rural"] <- factor(mean_rural$rural)
+levels(mean_rural$rural) <- c("Urban", "Rural")
+
+ggplot(mean_rural, aes(x=year, y=mean_ahcs, group = rural, fill = rural)) +
+  geom_col(position = "dodge2") +
+  labs(x = "Year", y = "AHCS Count") +
+  scale_fill_discrete(name = "Tract Type")
+```
+
+<br>
+
+#### Analysis
+
+Prior to regression analysis, we dropped all observations with population less than 1000 people for data quality purposes; these observations were outliers in our dataset. The dropped data accounted for less than 2% of the dataset and less than 4% of rural observations, suggesting minimal impact on our results. 
+
+We conducted an ordinary least squares linear panel regression analysis using combinations of our predictor variables to predict the logged provider count. Model 1 uses pooled OLS on socioeconomic status and percent minority to predict the logged provider count. Model 2 uses pooled OLS on socioeconomic status, percent minority, and rurality to predict the logged provider count. Model 3 uses a one-way (entity-fixed) fixed effects model on socioeconomic status and rurality to predict the logged provider count. Model 4 uses a one-way fixed effects model on socioeconomic status, rurality, and percent minority to predict the logged provider count. We compared the adjusted-R^2 of the four models and used the model with the greatest adjusted-R^2 in our discussion and interpretation of results.
+
+Our data has observations for individual years 2003-10 and for a single time period 2013-17 that is represented as 2013 in our regression. The NaNDA healthcare dataset had used the ACS 2008-12 5-year estimate for observations between 2010 to 2012 and ACS 2013-17 5-year estimate for observations between 2013 and 2017. Instead, we chose to follow recommendations from the U.S. Census against applying period estimates to individual years. We dropped years 2011 and 2012, and for each tract we used the average of their provider counts between 2013 and 2017 for the 2013-17 period.
+
+We proceed from the following general linear model:
+$$ log(Y)_{it} = \beta_1 X _{1,it} + \dots + \beta_n X_{n,it} + \alpha_i + u_{it} $$
+for i = 1,...,N Census tracts and t = 1,...T time periods. 
+
+The $\alpha_i$ is unobserved time-invariant heterogeneity across census tracts, and $u_{it}$ is error term with assumed conditional mean zero, i.e. $E(u_{it}|X_{i1}, X_{i2},\dots, X_{iT}) = 0$.
+
+<br>
+
+Substituting for our variables, we have the following equation:
+$$ log(ahcs)_{it} = \beta_1 povt_{it} + \beta_2 unemp_{it} + \beta_3 rural_{it} +\beta_4 nonwhite_{it} + \alpha_i + u_{it} $$
+for i = 1,...,70,505 Census tracts and t = 2003, ... , 2010, 2013 time periods.
+
+Models 1 and 2 treat all observations as i.i.d. regardless of the year, effectively ignoring the time dimension. Their combined error term is $\alpha_{it} + u_{it}$. In contrast, Models 3 and 4 make use of the time dimension to account for the unobserved time-invariant heterogeneity across census tracts, and thus $\alpha_{it}$ is cancelled out in the equation above. Their error term is $u_{it}$. If this unobserved heterogeneity is correlated with our dependent variable (e.g. omitted variable bias), then the pooled OLS estimate is biased and inconsistent, whereas the fixed-effects model estimate is consistent. 
+
+<br>
+
+```{r message=FALSE }
+require(plm)
+
+HCServices <- pdata.frame(HCServices, index = c("ctract", "year"))
+
+pool1 = plm( log_ahcs ~ povt + unemp + nonwhite,
+                 data = HCServices,
+                 model="pooling")
+
+pool2 = plm( log_ahcs ~ povt + unemp + rural + nonwhite,
+                 data = HCServices,
+                 model="pooling")
+
+fixed1 = plm( log_ahcs ~ povt + unemp + rural,
+                   data = HCServices, 
+                   model="within", 
+                   effect="individual")
+
+fixed2 = plm( log_ahcs ~ povt + unemp + rural + nonwhite,
+                   data = HCServices,  
+                   model="within", 
+                   effect="individual")
+
+random = plm( log_ahcs ~ povt + unemp + rural + nonwhite,
+                   data = HCServices,  
+                   model = "random")
+```
+
+### Results
+Table 3 presents results from a set of pooled OLS and fixed effects models designed to identify the effect of socioeconomic status, rurality, and percent minority on the logged provider count over time. All four models were shown to be statistically significant based on their F-statistic (p < .001; not shown). 
+
+Model 1 estimates the effect of socioeconomic status and percent minority on logged provider count irrespective of time. Poverty rate, percent unemployment, and percent minority were all significantly related to logged provider count (p < .001). Translated as odds ratios, a one percentage point increase in poverty rate is associated with a 34.6% decrease in the number of providers in a census tract, net of the other predictors. A one percentage point increase in the percent unemployed is associated with a substantial 99.2% decrease in provider count net of the other predictors. Finally, a one percentage point increase in percent minority is associated with a 3.1% decrease in provider count net of other predictors.
+
+Model 2 estimates the effect of socioeconomic status, percent minority, and rurality on logged provider count irrespective of time. The adjusted-R^2 value increased in comparison to Model 1, suggesting better model fit to the data when rurality is included. All predictors are significantly related to logged provider count (p < .001), however the coefficients have also changed. The effect of poverty rate is diminished, as a one percentage point increase is associated with a 21.7% decrease in provider count net of other predictors. The effect of percent minority expanded to a 11.2% decrease in provider count for a percentage point increase net of other predictors. The effect of percent unemployed remained fairly constant. Finally, provider counts for rural tracts are on average 29.6% smaller than urban tracts net of socioeconomic status and percent minority. 
+
+Model 3 estimates the effect of socioeconomic status and rurality on the change in logged provider count over time within the same tract. Contrary to expectations, the adjusted-R^2 for this model was lower than for Models 1 and 2 and suggests that it is worse than a completely flat horizontal line in predicting variation in logged provider count. Thus, we should proceed with caution in interpreting the odds ratios for each predictor. For example, a one percentage point increase in the poverty rate is associated with a 325.4% increase in provider count, and a one percentage point increase in the unemployment rate is associated with an 88.2% decrease in provider count. Rurality was omitted from the regression output entirely, which makes sense because it effectively served as a constant for each census tract in our dataset; no tracts changed from being urban to rural or vice versa. It is factored out of our regression similar to the time-invariant heterogeneity element. 
+
+Model 4 estimates the effect of socioeconomic status, rurality, and percent minority on the change in logged provider count over time within the same tract. The adjusted-R^2 was slightly improved compared to Model 3, however it was still negative. Model 4 performs worse than a horizontal line in predicting variation in logged provider count. We should discount interpretations of the predictor coefficients e.g. how a one percentage point increase in percent minority is associated with a 1038% increase in provider count. Rurality was omitted for the same reason as in Model 3. 
+Of the four models, Model 2 has the highest adjusted-R^2. We will use Model 2 in our discussion.
+
+<br>
+
+```{r, message = FALSE, results = 'asis' }
+
+stargazer(pool1, pool2, fixed1, fixed2,
+          omit.stat = c("n","f"),
+          digits = 3,
+          header = FALSE,
+          style = "asr",
+          title = "Linear Panel Regression Models of log(AHCS Count)",
+          covariate.labels= c("Poverty Rate", "Percent Unemployed", "Rural", "Percent Minority"),
+          dep.var.labels = "log(AHCS Count)",
+          notes = "N = 593,350")
+
+```
+`
+<br>
+
+### Discussion/Conclusion
+Using data on every census tract in the United States and Puerto Rico (with populations greater than 1000), this study explores the geographic distribution of health care services across the country from 2003 to 2017. We used panel regression models to assess the impact of rurality and socioeconomic and racial factors on this distribution via their effect on the number of providers in a given census tract.
+
+Our results lend support to the continued existence of disparities in health care access with respect to geography and across several dimensions. The socioeconomic status of a region can influence geographic access to care by means of providing disincentive for providers to locate there or for rural hospitals to remain open. As predicted by the literature, poverty rate and percent unemployed in a census tract were negatively associated with the number of providers in that tract. Race continues to be an explanatory factor in why some people have worse access to health care services. Having a greater proportion of minorities predicts that a census tract will have fewer providers. Finally, rurality was found to have an adverse impact on the number of providers independent of socioeconomic status and percent minority, suggesting that the rural-urban divide cannot be reduced to socioeconomic and racial disparities alone. 
+
+There are several limitations to this study. We cannot account for the bias of missing values from the observations that we dropped in the data preparation phase on results. We used an ordinary least squares regression to predict count data, where a Poisson regression would have been more appropriate. Our models accounted for less than 4% of the variance in logged provider count, although the scope of our data was the entire United States. Finally, the results of our fixed-effect models suggest that they may have been inappropriate for the type and amount of data we had, especially with variables that remained constant or varied only slightly over time.
+
+********************
+
+# References
+
+---
+nocite: '@*'
+... 
